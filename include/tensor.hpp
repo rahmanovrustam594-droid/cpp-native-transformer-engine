@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
+#include <random>
+#include <limits>
 
 namespace native_nn {
 
@@ -24,7 +26,7 @@ public:
 
     // Constructor: Create tensor with shape
     Tensor(const std::vector<size_t>& shape, DataType dtype = DataType::FP32)
-        : shape_(shape), dtype_(dtype), grad_(nullptr) {
+        : shape_(shape), dtype_(dtype), grad_(nullptr), requires_grad_(false) {
         size_t total_elements = compute_size();
         
         switch (dtype_) {
@@ -46,7 +48,8 @@ public:
     // Copy constructor
     Tensor(const Tensor& other) 
         : shape_(other.shape_), dtype_(other.dtype_), 
-          scale_(other.scale_), zero_point_(other.zero_point_) {
+          scale_(other.scale_), zero_point_(other.zero_point_), 
+          requires_grad_(false) {
         size_t total = compute_size();
         
         switch (dtype_) {
@@ -77,6 +80,36 @@ public:
           scale_(other.scale_), zero_point_(other.zero_point_),
           grad_(std::move(other.grad_)),
           requires_grad_(other.requires_grad_) {}
+
+    Tensor& operator=(const Tensor& other) {
+        if (this != &other) {
+            shape_ = other.shape_;
+            dtype_ = other.dtype_;
+            scale_ = other.scale_;
+            zero_point_ = other.zero_point_;
+            
+            size_t total = compute_size();
+            switch (dtype_) {
+                case DataType::FP32:
+                    data_fp32_ = std::make_unique<float[]>(total);
+                    std::copy(other.data_fp32_.get(), other.data_fp32_.get() + total, 
+                             data_fp32_.get());
+                    break;
+                case DataType::FP16:
+                    data_fp16_ = std::make_unique<uint16_t[]>(total);
+                    std::copy(other.data_fp16_.get(), other.data_fp16_.get() + total, 
+                             data_fp16_.get());
+                    break;
+                case DataType::INT8:
+                    data_int8_ = std::make_unique<int8_t[]>(total);
+                    std::copy(other.data_int8_.get(), other.data_int8_.get() + total, 
+                             data_int8_.get());
+                    break;
+            }
+            requires_grad_ = false;
+        }
+        return *this;
+    }
 
     ~Tensor() = default;
 
@@ -162,6 +195,14 @@ public:
 
     // Initialize with normal distribution
     void normal_(float mean = 0.0f, float stddev = 1.0f);
+    
+    // Reshape tensor
+    void reshape(const std::vector<size_t>& new_shape) {
+        if (compute_size_from_shape(new_shape) != compute_size()) {
+            throw std::runtime_error("Cannot reshape: total size mismatch");
+        }
+        shape_ = new_shape;
+    }
 
 private:
     std::vector<size_t> shape_;
@@ -178,7 +219,11 @@ private:
     bool requires_grad_ = false;
 
     size_t compute_size() const {
-        return std::accumulate(shape_.begin(), shape_.end(), 
+        return compute_size_from_shape(shape_);
+    }
+
+    static size_t compute_size_from_shape(const std::vector<size_t>& shape) {
+        return std::accumulate(shape.begin(), shape.end(), 
                               size_t(1), std::multiplies<size_t>());
     }
 
@@ -198,7 +243,6 @@ private:
 // ============================================================================
 
 inline uint16_t Tensor::float_to_fp16(float x) {
-    // Simplified float to half precision conversion
     uint32_t bits;
     std::memcpy(&bits, &x, sizeof(float));
     
@@ -245,13 +289,12 @@ inline void Tensor::normal_(float mean, float stddev) {
     if (dtype_ != DataType::FP32)
         throw std::runtime_error("normal_ only supported for FP32");
     
+    static std::mt19937 gen(std::random_device{}());
+    std::normal_distribution<float> dis(mean, stddev);
+    
     size_t total = compute_size();
     for (size_t i = 0; i < total; ++i) {
-        // Box-Muller transform
-        float u1 = (rand() + 1.0f) / (RAND_MAX + 1.0f);
-        float u2 = (rand() + 1.0f) / (RAND_MAX + 1.0f);
-        float z = std::sqrt(-2.0f * std::log(u1)) * std::cos(2.0f * M_PI * u2);
-        data_fp32_[i] = mean + stddev * z;
+        data_fp32_[i] = dis(gen);
     }
 }
 
